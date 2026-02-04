@@ -1,0 +1,407 @@
+#!/bin/bash
+# ports - interactive port viewer and process killer for IPv4/IPv6 using /proc
+
+PORT_PROTO=()
+PORT_ADDR=()
+PORT_PORT=()
+PORT_PID=()
+PORT_PIDINFO=()
+PORT_COUNT=0
+
+TREE_PID=()
+TREE_COMM=()
+TREE_CMD=()
+TREE_COUNT=0
+
+# --- Port listing (fast path: ss, fallback: /proc) ---
+
+collect_ports_ss() {
+  PORT_COUNT=0
+  local -A seen
+  while IFS= read -r line; do
+    local addr pid_part proto laddr lport pidinfo pid
+
+    # Parse: State Recv-Q Send-Q Local:Port Peer:Port Process
+    proto="tcp"
+    addr=$(echo "$line" | awk '{print $4}')
+    pid_part=$(echo "$line" | awk '{print $6}')
+
+    # Split address:port — handle IPv6 bracket notation and plain
+    if [[ "$addr" == \[* ]]; then
+      laddr="${addr%%\]:*}"
+      laddr="${laddr#\[}"
+      lport="${addr##*]:}"
+      proto="tcp6"
+    elif [[ "$addr" == *:*:* ]]; then
+      # bare ipv6 like ::1:8080 — last : separates port
+      lport="${addr##*:}"
+      laddr="${addr%:*}"
+      proto="tcp6"
+    else
+      lport="${addr##*:}"
+      laddr="${addr%:*}"
+    fi
+
+    # Deduplicate by proto+address+port
+    local key="$proto|$laddr|$lport"
+    [[ -n "${seen[$key]:-}" ]] && continue
+    seen[$key]=1
+
+    # Extract PID/comm from users:(("name",pid=123,fd=4))
+    pidinfo="-"
+    pid=""
+    if [[ "$pid_part" == *pid=* ]]; then
+      local name pnum
+      name=$(echo "$pid_part" | sed -E 's/.*\("([^"]+)".*/\1/')
+      pnum=$(echo "$pid_part" | sed -E 's/.*pid=([0-9]+).*/\1/')
+      if [[ -n "$pnum" ]]; then
+        pid="$pnum"
+        pidinfo="$pnum/$name"
+      fi
+    fi
+
+    PORT_PROTO[$PORT_COUNT]="$proto"
+    PORT_ADDR[$PORT_COUNT]="$laddr"
+    PORT_PORT[$PORT_COUNT]="$lport"
+    PORT_PID[$PORT_COUNT]="$pid"
+    PORT_PIDINFO[$PORT_COUNT]="$pidinfo"
+    PORT_COUNT=$((PORT_COUNT + 1))
+  done < <(ss -tlnp 2>/dev/null | awk 'NR>1')
+}
+
+# /proc fallback helpers
+
+decode_ip4() {
+  local iphex="$1"
+  printf "%d.%d.%d.%d" \
+    $((16#${iphex:6:2})) \
+    $((16#${iphex:4:2})) \
+    $((16#${iphex:2:2})) \
+    $((16#${iphex:0:2}))
+}
+
+rev4() {
+  local chunk="$1"
+  printf "%s%s%s%s" "${chunk:6:2}" "${chunk:4:2}" "${chunk:2:2}" "${chunk:0:2}"
+}
+
+compress_ipv6() {
+  local addr="$1"
+  local hextets=""
+  for i in 0 4 8 12 16 20 24 28; do
+    local part="${addr:$i:4}"
+    part="${part#000}"; part="${part#00}"; part="${part#0}"
+    [ -z "$part" ] && part=0
+    hextets="${hextets}:${part}"
+  done
+  hextets="${hextets#:}"
+  echo "$hextets" | sed -E 's/(^|:)0(:0)+(:|$)/::/; s/::+/:/g'
+}
+
+decode_ip6() {
+  local iphex="$1"
+  local fixed=""
+  fixed="$fixed$(rev4 "${iphex:0:8}")"
+  fixed="$fixed$(rev4 "${iphex:8:8}")"
+  fixed="$fixed$(rev4 "${iphex:16:8}")"
+  fixed="$fixed$(rev4 "${iphex:24:8}")"
+  printf "%s" "$(compress_ipv6 "$fixed")"
+}
+
+decode_ip() {
+  local hex="$1"
+  case "${#hex}" in
+    8)  decode_ip4 "$hex" ;;
+    32) decode_ip6 "$hex" ;;
+    *)  printf "%s" "$hex" ;;
+  esac
+}
+
+build_inode_map() {
+  for pidpath in /proc/[0-9]*; do
+    local pid=${pidpath#/proc/}
+    local comm
+    comm=$(tr -d '\0' < "$pidpath/comm" 2>/dev/null) || continue
+    for fd in "$pidpath"/fd/*; do
+      local link
+      link=$(readlink "$fd" 2>/dev/null) || continue
+      case "$link" in
+        socket:\[*)
+          local inode=${link#socket:[}
+          inode=${inode%]}
+          echo "$inode $pid/$comm"
+          ;;
+      esac
+    done
+  done | sort -u
+}
+
+truncate_field() {
+  local field="$1" max=20
+  local len=${#field}
+  if [ "$len" -gt "$max" ]; then
+    echo "${field:0:$max}…"
+  else
+    echo "$field"
+  fi
+}
+
+collect_ports_proc() {
+  PORT_COUNT=0
+  local tmp="/tmp/inodemap.$$"
+  build_inode_map > "$tmp"
+
+  local file proto
+  for file in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$file" ] || continue
+    proto="tcp"
+    [[ "$file" == *tcp6 ]] && proto="tcp6"
+
+    while read -r local_addr inode; do
+      local liphex="${local_addr%:*}"
+      local lporthex="${local_addr#*:}"
+      local lip lport pidinfo pid
+
+      lip="$(decode_ip "$liphex")"
+      lport="$((16#$lporthex))"
+
+      [[ "$proto" == "tcp6" ]] && lip="${lip//\[::\]/::}"
+
+      pidinfo=$(awk -v i="$inode" '$1==i {print $2}' "$tmp" | paste -sd, -)
+      pid=""
+      if [ -n "$pidinfo" ]; then
+        pid="${pidinfo%%/*}"
+        pidinfo=$(truncate_field "$pidinfo")
+      else
+        pidinfo="-"
+      fi
+
+      PORT_PROTO[$PORT_COUNT]="$proto"
+      PORT_ADDR[$PORT_COUNT]="$lip"
+      PORT_PORT[$PORT_COUNT]="$lport"
+      PORT_PID[$PORT_COUNT]="$pid"
+      PORT_PIDINFO[$PORT_COUNT]="$pidinfo"
+      PORT_COUNT=$((PORT_COUNT + 1))
+    done < <(awk 'NR>1 && $4=="0A" {print $2, $10}' "$file" | awk '!seen[$1]++ {print}')
+  done
+
+  rm -f "$tmp"
+}
+
+collect_ports() {
+  if command -v ss &>/dev/null; then
+    collect_ports_ss
+  else
+    collect_ports_proc
+  fi
+}
+
+# --- Display port table with row numbers ---
+
+show_ports() {
+  if (( PORT_COUNT == 0 )); then
+    echo "  No listening ports found."
+    return
+  fi
+
+  printf "  %-4s %-5s %-26s %s\n" "#" "Proto" "Local Address" "PID/Program"
+  printf "  %-4s %-5s %-26s %s\n" "----" "-----" "--------------------------" "-----------"
+
+  local i
+  for ((i=0; i<PORT_COUNT; i++)); do
+    printf "  %-4s %-5s %-26s %s\n" \
+      "$((i + 1))" \
+      "${PORT_PROTO[$i]}" \
+      "${PORT_ADDR[$i]}:${PORT_PORT[$i]}" \
+      "${PORT_PIDINFO[$i]}"
+  done
+}
+
+# --- Process tree helpers (original /proc approach) ---
+
+get_ppid() {
+  awk '/^PPid:/ {print $2}' "/proc/$1/status" 2>/dev/null
+}
+
+get_comm() {
+  tr -d '\0' < "/proc/$1/comm" 2>/dev/null
+}
+
+get_cmdline() {
+  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | sed 's/ $//'
+}
+
+build_process_tree() {
+  local current="$1"
+  TREE_PID=(); TREE_COMM=(); TREE_CMD=()
+  TREE_COUNT=0
+
+  while [ -n "$current" ] && [ "$current" != "0" ] && [ "$current" != "1" ]; do
+    local comm
+    comm=$(get_comm "$current") || break
+    [ -z "$comm" ] && break
+    local cmdline
+    cmdline=$(get_cmdline "$current")
+
+    TREE_PID[$TREE_COUNT]="$current"
+    TREE_COMM[$TREE_COUNT]="$comm"
+    TREE_CMD[$TREE_COUNT]="$cmdline"
+    TREE_COUNT=$((TREE_COUNT + 1))
+
+    local ppid
+    ppid=$(get_ppid "$current") || break
+    [ -z "$ppid" ] || [ "$ppid" = "$current" ] && break
+    current="$ppid"
+  done
+}
+
+show_process_tree() {
+  local i j indent arrow
+  for ((i=0; i<TREE_COUNT; i++)); do
+    indent=""
+    for ((j=0; j<i; j++)); do indent="  $indent"; done
+    arrow="→"; (( i > 0 )) && arrow="↑"
+    printf "  %s%s PID %-7s %-15s %s\n" \
+      "$indent" "$arrow" \
+      "${TREE_PID[$i]}" "[${TREE_COMM[$i]}]" "${TREE_CMD[$i]}"
+  done
+}
+
+# --- Kill a PID and all its descendants ---
+
+# Recursively collect all child PIDs of a given PID
+get_descendants() {
+  local parent="$1"
+  local children
+  # Use /proc/*/status which has a clean "PPid:\t<num>" line (no parsing issues)
+  children=$(grep -l "^PPid:.*${parent}$" /proc/[0-9]*/status 2>/dev/null \
+    | while read -r f; do
+        local p="${f#/proc/}"
+        p="${p%/status}"
+        # Verify exact match (grep may be too broad)
+        local actual
+        actual=$(awk '/^PPid:/ {print $2}' "$f" 2>/dev/null)
+        [ "$actual" = "$parent" ] && echo "$p"
+      done | sort -un)
+  for child in $children; do
+    echo "$child"
+    get_descendants "$child"
+  done
+}
+
+do_kill_pid() {
+  local pid="$1"
+
+  # Collect all descendants first (before killing the parent)
+  local all_pids="$pid"
+  local descendants
+  descendants=$(get_descendants "$pid")
+  if [ -n "$descendants" ]; then
+    all_pids="$pid $descendants"
+    echo "  PID $pid has child processes: $descendants"
+  fi
+
+  echo "  Sending SIGTERM to: $all_pids"
+  for p in $all_pids; do
+    kill -TERM "$p" 2>/dev/null
+  done
+
+  sleep 1
+
+  # SIGKILL any survivors
+  for p in $all_pids; do
+    if [ -d "/proc/$p" ]; then
+      echo "  PID $p still alive, sending SIGKILL..."
+      kill -9 "$p" 2>/dev/null
+    fi
+  done
+}
+
+# --- Interactive flow for a selected port ---
+
+interactive_kill() {
+  local idx="$1"
+  local port="${PORT_PORT[$idx]}"
+  local pid="${PORT_PID[$idx]}"
+
+  if [ -z "$pid" ] || [ "$pid" = "-" ]; then
+    echo ""
+    echo "  No PID found for port $port."
+    return
+  fi
+
+  echo ""
+  echo "  Process tree for port $port:"
+  echo ""
+
+  build_process_tree "$pid"
+  show_process_tree
+
+  # Collect valid PIDs for validation
+  local valid_pids=" "
+  for ((i=0; i<TREE_COUNT; i++)); do
+    valid_pids+="${TREE_PID[$i]} "
+  done
+
+  echo ""
+  printf "  PID to kill (or b to go back): "
+  read -r choice
+
+  if [ "$choice" = "b" ] || [ "$choice" = "B" ] || [ -z "$choice" ]; then
+    echo "  Cancelled."
+    return
+  fi
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+    echo "  Not a valid PID."
+    return
+  fi
+
+  if [[ "$valid_pids" != *" $choice "* ]]; then
+    echo "  PID $choice is not in this process tree."
+    return
+  fi
+
+  echo ""
+  do_kill_pid "$choice"
+  echo "  Done."
+}
+
+# --- Main interactive loop ---
+
+main() {
+  while true; do
+    collect_ports
+
+    echo ""
+    echo "Listening ports:"
+    echo ""
+    show_ports
+    echo ""
+
+    if (( PORT_COUNT == 0 )); then
+      echo "Nothing to do."
+      break
+    fi
+
+    echo "Enter a row number to inspect/kill, or q to quit."
+    printf "> "
+    read -r input
+
+    case "$input" in
+      q|Q|"") break ;;
+      *[!0-9]*)
+        echo "  Invalid input. Enter a number (1-$PORT_COUNT) or q."
+        ;;
+      *)
+        if (( input >= 1 && input <= PORT_COUNT )); then
+          interactive_kill $((input - 1))
+        else
+          echo "  Out of range. Enter 1-$PORT_COUNT."
+        fi
+        ;;
+    esac
+  done
+}
+
+main

@@ -1,0 +1,171 @@
+#!/bin/bash
+
+# Help Message
+show_help() {
+  cat <<EOF
+Usage: app COMMAND
+
+Commands:
+  --help          Show this help message
+  deploy          Deploy using settings from .deploy
+  connect         Connect to SSH_TARGET via jump host with special options
+
+See .deploy for configuration.
+EOF
+
+if [[ -f .deploy ]]; then
+  load_env
+  echo ""
+  echo "Current .deploy:"
+  echo "  Target          $SSH_TARGET"
+  echo "  Jump            $SSH_JUMP"
+  [[ -n "$SKIP_RSYNC" ]] && echo "  Skip rsync       $SKIP_RSYNC"
+fi
+}
+
+# Shared Helpers
+ensure_ssh_key_loaded() {
+  if [[ -z "$SSH_KEY" ]]; then
+    echo "Error: SSH_KEY not set in .deploy"
+    exit 1
+  fi
+
+  # Start een ssh-agent als er nog geen draait
+  if [[ -z "$SSH_AUTH_SOCK" ]]; then
+    eval "$(ssh-agent -s)"
+  fi
+
+  # Voeg de sleutel toe aan de agent als hij nog niet is geladen
+  if ! ssh-add -l | grep -q "$(ssh-keygen -lf "$SSH_KEY" | awk '{print $2}')" 2>/dev/null; then
+    ssh-add "$SSH_KEY"
+  fi
+}
+
+load_env() {
+  DEPLOY_ENV=".deploy"
+  [[ ! -f "$DEPLOY_ENV" ]] && echo ".deploy file not found." && exit 1
+  source "$DEPLOY_ENV"
+}
+
+ssh_cmd() {
+  ssh \
+    -o ProxyCommand="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p $SSH_JUMP" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    "$@"
+}
+
+scp_cmd() {
+  scp \
+    -o ProxyCommand="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p $SSH_JUMP" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    "$@"
+}
+
+run_remote_script() {
+  local script_path="$1"
+  local remote_path="/tmp/$(basename "$script_path").$$"
+  [[ ! -f "$script_path" ]] && return 0
+
+  scp_cmd "$script_path" "${SSH_TARGET}:$remote_path" || {
+    echo "Error: Failed to copy $(basename "$script_path") to remote"
+    return 1
+  }
+
+  ssh_cmd "${SSH_TARGET}" "cd '$TARGET_DIR' && bash '$remote_path'; rm -f '$remote_path'" || {
+    echo "Error: $(basename "$script_path") script failed on remote"
+    return 1
+  }
+
+  return 0
+}
+
+run_local_script() {
+  local script_path="$1"
+  local dir="$2"
+  [[ -f "$script_path" ]] || return 0
+
+  (
+    cd "$dir" || exit 1
+    bash "$script_path"
+  ) || {
+    echo "Error: $(basename "$script_path") script failed locally"
+    return 1
+  }
+
+  return 0
+}
+
+prepare_rsync_excludes() {
+  if [[ -n "$RSYNC_EXCLUDES" ]]; then
+    local tmpfile
+    tmpfile="$(mktemp)"
+    echo "$RSYNC_EXCLUDES" | sed '/^[[:space:]]*$/d' > "$tmpfile"
+    RSYNC_EXCLUDES_FILE="$tmpfile"
+    RSYNC_EXCLUDES_ARGS=(--exclude-from="$tmpfile")
+  else
+    RSYNC_EXCLUDES_FILE=""
+    RSYNC_EXCLUDES_ARGS=()
+  fi
+}
+
+cleanup_excludes_file() {
+  [[ -n "$RSYNC_EXCLUDES_FILE" ]] && rm -f "$RSYNC_EXCLUDES_FILE"
+}
+
+# Deploy
+deploy() {
+  load_env
+  ensure_ssh_key_loaded
+
+  SOURCE_DIR="$(cd "$(dirname "$DEPLOY_ENV")" && pwd)"
+  [[ -n "$TARGET_AFTER" ]] && TARGET_AFTER="$SOURCE_DIR/$TARGET_AFTER"
+
+  prepare_rsync_excludes
+
+  run_local_script "$SOURCE_BEFORE" "$SOURCE_DIR" || {
+    cleanup_excludes_file
+    exit 1
+  }
+
+  run_remote_script "$TARGET_BEFORE" || {
+    cleanup_excludes_file
+    exit 1
+  }
+
+  if [[ "$SKIP_RSYNC" == "1" ]]; then
+    echo "Skipping rsync (SKIP_RSYNC=1 in .deploy)"
+  else
+    RSYNC_SSH="ssh -o ProxyCommand='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p $SSH_JUMP' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    rsync -e "$RSYNC_SSH" -av "${RSYNC_EXCLUDES_ARGS[@]}" "${SOURCE_DIR}/" "${SSH_TARGET}:${TARGET_DIR}/"
+    RSYNC_RESULT=$?
+
+    cleanup_excludes_file
+    [[ $RSYNC_RESULT -ne 0 ]] && echo "rsync failed" && exit 1
+  fi
+
+  run_remote_script "$TARGET_AFTER" || exit 1
+  run_local_script "$SOURCE_AFTER" "$SOURCE_DIR" || exit 1
+}
+
+# Connect
+connect() {
+  load_env
+  ensure_ssh_key_loaded
+
+  if [[ -z "$SSH_TARGET" || -z "$SSH_JUMP" ]]; then
+    echo "Error: SSH_TARGET or SSH_JUMP not set in .deploy"
+    exit 1
+  fi
+
+  ssh_cmd "$SSH_TARGET"
+}
+
+# Main
+case "$1" in
+  help|--help|-h) show_help ;;
+  deploy)         deploy ;;
+  connect)        connect ;;
+  *)              show_help ;;
+esac

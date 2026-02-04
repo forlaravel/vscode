@@ -1,0 +1,24 @@
+name: Cleanup Images
+
+on:
+    workflow_dispatch:
+    schedule:
+        - cron: '0 3 * * *'
+
+permissions:
+    packages: write
+
+jobs:
+    cleanup:
+        name: Cleanup Old Images
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Prune untagged images
+                uses: snok/container-retention-policy@v3.0.0
+                with:
+                    image-names: vscode
+                    account: user
+                    token: ${{ secrets.GITHUB_TOKEN }}
+                    tag-selection: untagged
+                    cut-off: 2w
+                    keep-n-most-recent: 3

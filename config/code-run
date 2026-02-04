@@ -1,0 +1,198 @@
+#!/bin/bash
+echo "vscode-custom container (code-server + nginx)"
+
+# ── Generate xdebug ini from env vars ────────────────────────────────────────
+sudo tee /usr/local/etc/php/conf.d/xdebug-runtime.ini > /dev/null <<XDEBUG_INI
+[xdebug]
+xdebug.mode=${PHP_XDEBUG_MODE:-off}
+xdebug.start_with_request=${PHP_XDEBUG_START_WITH_REQUEST:-yes}
+xdebug.client_host=${PHP_XDEBUG_CLIENT_HOST:-localhost}
+xdebug.client_port=${PHP_XDEBUG_CLIENT_PORT:-9003}
+XDEBUG_INI
+echo "Xdebug ini written (mode=${PHP_XDEBUG_MODE:-off})"
+
+# ── Nginx reverse proxy ───────────────────────────────────────────────────────
+NGINX_HOST=${VSCODE_HOST:-0.0.0.0}
+CODESERVER_INTERNAL_PORT=8586
+
+echo "Generating nginx config (HTTP ${NGINX_HOST}:8000, HTTPS ${NGINX_HOST}:8443, proxy to code-server on 127.0.0.1:${CODESERVER_INTERNAL_PORT})"
+
+sudo tee /etc/nginx/nginx.conf > /dev/null <<NGINX_CONF
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /dev/stderr;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log /dev/stdout;
+    sendfile on;
+    client_max_body_size 0;
+
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    # Port forwarding: dev-fwd-{port}.* -> localhost:{port}
+    server {
+        listen ${NGINX_HOST}:8000;
+        listen ${NGINX_HOST}:8443 ssl;
+        ssl_certificate /etc/nginx/ssl/selfsigned.crt;
+        ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+        server_name ~^dev-fwd-(?<fwd_port>\d+)\.;
+
+        location / {
+            proxy_pass http://127.0.0.1:\$fwd_port;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_buffering off;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+        }
+    }
+
+    # Default: code-server
+    server {
+        listen ${NGINX_HOST}:8000 default_server;
+        listen ${NGINX_HOST}:8443 ssl default_server;
+        ssl_certificate /etc/nginx/ssl/selfsigned.crt;
+        ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+        server_name _;
+
+        location / {
+            proxy_pass http://127.0.0.1:${CODESERVER_INTERNAL_PORT};
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_buffering off;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+        }
+    }
+}
+NGINX_CONF
+
+echo "Starting nginx..."
+sudo nginx
+echo "Nginx started (pid $(cat /run/nginx.pid 2>/dev/null || echo 'unknown'))"
+
+# ── Run after-boot scripts if present ─────────────────────────────────────────
+if [ -d /custom-scripts/after-boot ]; then
+  for script in /custom-scripts/after-boot/*; do
+    if [ -f "$script" ] && [ -x "$script" ]; then
+      echo "Running after-boot script: $script"
+      "$script"
+    fi
+  done
+fi
+
+# ── Build code-server command ────────────────────────────────────────────────
+
+# Export unprefixed versions for code-server to pick up
+if [ -n "$VSCODE_PASSWORD" ]; then
+  export PASSWORD="$VSCODE_PASSWORD"
+fi
+if [ -n "$VSCODE_HASHED_PASSWORD" ]; then
+  export HASHED_PASSWORD="$VSCODE_HASHED_PASSWORD"
+fi
+
+echo "code-server binding to 127.0.0.1:${CODESERVER_INTERNAL_PORT} (behind nginx)"
+
+# Initialize the base command (bind to internal port, nginx handles external)
+CMD="code-server --bind-addr 127.0.0.1:${CODESERVER_INTERNAL_PORT}"
+
+# User data directory
+if [ -n "$VSCODE_SERVER_DATA_DIR" ]; then
+  echo "Using user data directory: $VSCODE_SERVER_DATA_DIR"
+  CMD="$CMD --user-data-dir $VSCODE_SERVER_DATA_DIR"
+fi
+
+# Socket path
+if [ -n "$VSCODE_SOCKET_PATH" ]; then
+  echo "Using socket path: $VSCODE_SOCKET_PATH"
+  CMD="$CMD --socket $VSCODE_SOCKET_PATH"
+fi
+
+# Auth mode: auto-detect from password if not explicitly set
+if [ -z "$VSCODE_AUTH_MODE" ]; then
+  if [ -n "$VSCODE_PASSWORD" ] || [ -n "$VSCODE_HASHED_PASSWORD" ]; then
+    VSCODE_AUTH_MODE="password"
+  else
+    VSCODE_AUTH_MODE="none"
+  fi
+fi
+echo "Using auth mode: $VSCODE_AUTH_MODE"
+CMD="$CMD --auth $VSCODE_AUTH_MODE"
+
+# Password info
+if [ "$VSCODE_AUTH_MODE" = "password" ]; then
+  if [ -n "$VSCODE_PASSWORD" ]; then
+    echo "Password auth via VSCODE_PASSWORD env variable"
+  elif [ -n "$VSCODE_HASHED_PASSWORD" ]; then
+    echo "Password auth via VSCODE_HASHED_PASSWORD env variable"
+  else
+    echo "WARNING: auth=password but no VSCODE_PASSWORD or VSCODE_HASHED_PASSWORD set, code-server will auto-generate a password"
+  fi
+fi
+
+# Log level
+if [ -n "$VSCODE_LOG_LEVEL" ]; then
+  echo "Using log level: $VSCODE_LOG_LEVEL"
+  CMD="$CMD --log $VSCODE_LOG_LEVEL"
+fi
+
+# Verbose flag
+if [ "$VSCODE_VERBOSE" = "true" ]; then
+  echo "Running in verbose mode"
+  CMD="$CMD --verbose"
+fi
+
+# Extensions and config paths
+if [ -n "$VSCODE_EXTENSIONS_DIR" ]; then
+  echo "Using extensions dir: $VSCODE_EXTENSIONS_DIR"
+  CMD="$CMD --extensions-dir $VSCODE_EXTENSIONS_DIR"
+fi
+
+if [ -n "$VSCODE_CONFIG_FILE" ]; then
+  echo "Using config file: $VSCODE_CONFIG_FILE"
+  CMD="$CMD --config $VSCODE_CONFIG_FILE"
+fi
+
+# Disable telemetry if requested
+if [ "$VSCODE_DISABLE_TELEMETRY" = "true" ]; then
+  echo "Disabling telemetry"
+  CMD="$CMD --disable-telemetry"
+fi
+
+# Proxy domain
+if [ -n "$VSCODE_PROXY_DOMAIN" ]; then
+  echo "Using proxy domain: $VSCODE_PROXY_DOMAIN"
+  CMD="$CMD --proxy-domain $VSCODE_PROXY_DOMAIN"
+fi
+
+# Default folder to open
+if [ -n "$VSCODE_DEFAULT_FOLDER" ]; then
+  echo "Opening folder: $VSCODE_DEFAULT_FOLDER"
+  CMD="$CMD $VSCODE_DEFAULT_FOLDER"
+fi
+
+# ── Run code-server with auto-restart ─────────────────────────────────────────
+echo "Executing: $CMD"
+while true; do
+  rm -f /home/laravel/.local/share/code-server/code-server-ipc.sock
+  FORCE_COLOR=1 $CMD
+  echo "code-server exited ($?), restarting in 2s..."
+  sleep 2
+done

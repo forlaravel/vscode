@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# connect HOST PORT [TIMEOUT_SECONDS]
+set -u
+
+host="${1:-}"; port="${2:-}"; to="${3:-2}"
+if [[ -z "${host}" || -z "${port}" ]]; then
+  echo "Usage: $0 HOST PORT [TIMEOUT_SECONDS]" >&2
+  exit 2
+fi
+
+# Wrap raw IPv6 literals in [] for /dev/tcp
+if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+  host="[$host]"
+fi
+
+rc=1
+
+if command -v timeout >/dev/null 2>&1; then
+  # Use coreutils timeout, no function calls inside the subshell
+  if timeout "$to" bash -c 'exec 3>/dev/tcp/$0/$1' "$host" "$port" >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+    [[ $rc -eq 124 ]] && { echo "TIMEOUT: $host:$port after ${to}s" >&2; exit 124; }
+  fi
+else
+  # Pure Bash timeout fallback
+  (
+    trap 'exit 124' TERM
+    { sleep "$to"; kill -s TERM $$ 2>/dev/null; } &
+    watchdog=$!
+    exec 3>/dev/tcp/"$host"/"$port" >/dev/null 2>&1
+    rc=$?
+    kill "$watchdog" 2>/dev/null
+    exit "$rc"
+  )
+  rc=$?
+  [[ $rc -eq 124 ]] && { echo "TIMEOUT: $host:$port after ${to}s" >&2; exit 124; }
+fi
+
+if [[ $rc -eq 0 ]]; then
+  echo "OK: $host:$port is reachable"
+  exit 0
+else
+  echo "FAIL: cannot connect to $host:$port" >&2
+  exit 1
+fi

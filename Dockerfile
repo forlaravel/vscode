@@ -32,8 +32,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline-dev \
     libedit-dev \
     libonig-dev \
-    libuuid1 \
-    uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── PHP extensions ──────────────────────────────────────────────────────────
@@ -52,8 +50,10 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     sockets
 
 # ── PECL extensions ─────────────────────────────────────────────────────────
-RUN pecl install apcu uuid redis xdebug \
-    && docker-php-ext-enable apcu uuid redis xdebug
+# Use install-php-extensions for reliable extension installation
+ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+RUN chmod +x /usr/local/bin/install-php-extensions && \
+    install-php-extensions apcu redis xdebug
 
 # ── Node.js 22 (from multi-stage) ──────────────────────────────────────────
 COPY --from=node /usr/local/bin/node     /usr/local/bin/node

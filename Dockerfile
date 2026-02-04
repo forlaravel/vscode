@@ -1,9 +1,11 @@
+# ── PHP version (must be before any FROM to be usable in FROM lines) ──────────
+ARG INPUT_PHP="8.4"
+
 # ── Multi-stage: grab Node.js and Composer ───────────────────────────────────
 FROM node:22-bookworm-slim AS node
 FROM composer:latest        AS composer
 
 # ── Main image: PHP CLI on Debian Bookworm (glibc) ───────────────────────────
-ARG INPUT_PHP="8.4"
 FROM php:${INPUT_PHP}-cli-bookworm
 
 # ── System packages ─────────────────────────────────────────────────────────

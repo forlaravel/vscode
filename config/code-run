@@ -188,11 +188,26 @@ if [ -n "$VSCODE_DEFAULT_FOLDER" ]; then
   CMD="$CMD $VSCODE_DEFAULT_FOLDER"
 fi
 
+# ── Graceful shutdown on SIGTERM/SIGINT ────────────────────────────────────────
+cleanup() {
+  echo "Received shutdown signal, stopping..."
+  sudo nginx -s quit 2>/dev/null
+  kill "$CODE_SERVER_PID" 2>/dev/null
+  wait "$CODE_SERVER_PID" 2>/dev/null
+  exit 0
+}
+trap cleanup SIGTERM SIGINT
+
 # ── Run code-server with auto-restart ─────────────────────────────────────────
 echo "Executing: $CMD"
 while true; do
   rm -f /home/laravel/.local/share/code-server/code-server-ipc.sock
-  FORCE_COLOR=1 $CMD
-  echo "code-server exited ($?), restarting in 2s..."
+  FORCE_COLOR=1 $CMD &
+  CODE_SERVER_PID=$!
+  wait $CODE_SERVER_PID
+  EXIT_CODE=$?
+  # If killed by our trap, don't restart
+  [ $EXIT_CODE -eq 0 ] && exit 0
+  echo "code-server exited ($EXIT_CODE), restarting in 2s..."
   sleep 2
 done

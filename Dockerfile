@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline-dev \
     libedit-dev \
     libonig-dev \
+    uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── PHP extensions ──────────────────────────────────────────────────────────
@@ -56,7 +57,7 @@ ADD --chmod=755 \
     --checksum=sha256:a6cf3f9eb1048caaad775f2a660fc2030000abba904c820ac24e7b20f8d732f7 \
     https://github.com/mlocati/docker-php-extension-installer/releases/download/2.9.29/install-php-extensions \
     /usr/local/bin/
-RUN install-php-extensions apcu redis xdebug
+RUN install-php-extensions apcu redis xdebug uuid
 
 # ── Node.js 22 (from multi-stage) ──────────────────────────────────────────
 COPY --from=node /usr/local/bin/node     /usr/local/bin/node

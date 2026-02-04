@@ -85,11 +85,9 @@ COPY ./config/code-run /usr/local/bin/code-run
 RUN chmod +x /usr/local/bin/code-run
 
 # ── Helper tools ────────────────────────────────────────────────────────────
-COPY ./tools/connect /usr/local/bin/connect
 COPY ./tools/ports   /usr/local/bin/ports
-COPY ./tools/app     /usr/local/bin/app
 COPY ./tools/cl      /usr/local/bin/cl
-RUN chmod +x /usr/local/bin/connect /usr/local/bin/ports /usr/local/bin/app /usr/local/bin/cl
+RUN chmod +x /usr/local/bin/ports /usr/local/bin/cl
 
 # ── Xdebug defaults ────────────────────────────────────────────────────────
 ENV PHP_XDEBUG_MODE="off"

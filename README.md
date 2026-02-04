@@ -125,7 +125,7 @@ volumes:
 
 ## Port Forwarding
 
-nginx supports automatic port forwarding via subdomains. Access `dev-fwd-{port}.localhost:8000` to proxy to `localhost:{port}` inside the container. This is useful for previewing Laravel apps or other services running in the container.
+nginx supports automatic port forwarding via subdomains. Access `dev-fwd-{port}.example.com` to proxy to `localhost:{port}` inside the container. This is useful for previewing Laravel apps or other services running in the container.
 
 ## Local Build
 

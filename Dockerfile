@@ -52,11 +52,11 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
 # ── PECL extensions ─────────────────────────────────────────────────────────
 # Use install-php-extensions for reliable extension installation
 # Pinned to v2.9.29 for reproducibility and security
-ADD --checksum=sha256:a6cf3f9eb1048caaad775f2a660fc2030000abba904c820ac24e7b20f8d732f7 \
+ADD --chmod=755 \
+    --checksum=sha256:a6cf3f9eb1048caaad775f2a660fc2030000abba904c820ac24e7b20f8d732f7 \
     https://github.com/mlocati/docker-php-extension-installer/releases/download/2.9.29/install-php-extensions \
     /usr/local/bin/
-RUN chmod +x /usr/local/bin/install-php-extensions && \
-    install-php-extensions apcu redis xdebug
+RUN install-php-extensions apcu redis xdebug
 
 # ── Node.js 22 (from multi-stage) ──────────────────────────────────────────
 COPY --from=node /usr/local/bin/node     /usr/local/bin/node

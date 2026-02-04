@@ -22,38 +22,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mariadb-client \
     procps \
     iproute2 \
-    libfreetype6-dev \
-    libjpeg62-turbo-dev \
-    libpng-dev \
-    libicu-dev \
-    libxml2-dev \
-    libzip-dev \
-    libsodium-dev \
-    libreadline-dev \
-    libedit-dev \
-    libonig-dev \
-    libuuid1 \
-    uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ── PHP extensions ──────────────────────────────────────────────────────────
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j$(nproc) \
+# ── PHP extensions (install-php-extensions handles deps + cleanup) ─────────
+RUN curl -sSLf -o /usr/local/bin/install-php-extensions \
+        https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions \
+    && chmod +x /usr/local/bin/install-php-extensions \
+    && install-php-extensions \
+    apcu \
     bcmath \
     gd \
     intl \
     mbstring \
     opcache \
-    pdo_mysql \
-    sodium \
-    xml \
-    zip \
     pcntl \
-    sockets
-
-# ── PECL extensions ─────────────────────────────────────────────────────────
-RUN pecl install apcu uuid redis xdebug \
-    && docker-php-ext-enable apcu uuid redis xdebug
+    pdo_mysql \
+    redis \
+    sockets \
+    sodium \
+    uuid \
+    xdebug \
+    xml \
+    zip
 
 # ── Node.js 22 (from multi-stage) ──────────────────────────────────────────
 COPY --from=node /usr/local/bin/node     /usr/local/bin/node

@@ -34,10 +34,12 @@ RUN curl -sSLf -o /usr/local/bin/install-php-extensions \
     gd \
     intl \
     mbstring \
+    mysqli \
     opcache \
     pcntl \
     pdo_mysql \
     redis \
+    soap \
     sockets \
     sodium \
     uuid \

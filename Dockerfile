@@ -8,6 +8,8 @@ FROM composer:latest        AS composer
 # ── Main image: PHP CLI on Debian Bookworm (glibc) ───────────────────────────
 FROM php:${INPUT_PHP}-cli-bookworm
 
+LABEL org.opencontainers.image.source=https://github.com/forlaravel/vscode
+
 # ── System packages ─────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \

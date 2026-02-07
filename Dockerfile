@@ -33,17 +33,31 @@ RUN curl -sSLf -o /usr/local/bin/install-php-extensions \
     && install-php-extensions \
     apcu \
     bcmath \
+    bz2 \
+    calendar \
+    ctype \
+    exif \
     gd \
+    gmp \
+    iconv \
+    imagick \
+    imap \
     intl \
+    json \
+    ldap \
     mbstring \
+    memcached \
     mysqli \
     opcache \
+    openssl \
     pcntl \
     pdo_mysql \
+    pdo_pgsql \
     redis \
     soap \
     sockets \
     sodium \
+    tokenizer \
     uuid \
     xdebug \
     xml \
